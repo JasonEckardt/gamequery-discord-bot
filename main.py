@@ -37,10 +37,28 @@ class ServerConfig:
 
 
 class ServerEmbed(discord.Embed):
+    """
+    The server embed should be built on init and update.
+    Sketch of object lifecycle:
+      1. ServerEmbed __init__ -> Build from server config
+      2. Query periodically for server status
+      3. If CURRENT ServerEmbed != NEW Query, NEW Query = ServerEmbed
+      4. If destroyed, destroy ServerEmbed and unregister from server_data.json. 
+         The admin shouldn't delete the embed via discord but from the app_command `Delete game server`
+      5. If the embed ID doesn't exist, send a new embed (?)
+
+    Open Questions brain dump:
+      - What happens if a server doesn't need querying: `protocol = NONE` ?
+      - How do we know which Servers to query?
+      - Are we selective about server queries or is it cheap?
+      - What differentates __init__ from build?
+      - Does a ServerEmbed need to be rebuilt after every query?
+        - Is it cheap or expensive?
+    """
     ## TODO:= Resolve if needed -> **kwargs are for passing additional embed args without needing to enumerate them
     def __init__(self, config: ServerConfig, **kwargs):
         super().__init__()
-        self.build(config=config)
+        await self.build(config=config)
 
     async def query(self, address: str, port: int, protocol: Protocol):
         ## TODO:= Guards for A2S and verify query host is reachable
@@ -135,9 +153,10 @@ class Client(discord.Client):
         for embed_id, config in server_store.servers.items():
             try:
                 config = ServerConfig(**config)
-                embed = await ServerEmbed.build(config)
-                message = await self.channel.send(embed)
-                await message.edit(embed=embed)
+                embed = await ServerEmbed(config)
+                ## TODO:= Edit the embed (create if it doesn't exist)
+                #message = await self.channel.send(embed)
+                #await message.edit(embed=embed)
             ## TODO:= Blind exception for now, til I know which ones would actually occur
             except Exception as e:  # noqa: BLE001
                 print(f"Failed to update {embed_id}, {config.name}: {e}")
@@ -147,65 +166,65 @@ class Client(discord.Client):
         await self.wait_until_ready()
 
 
-server_store = ServerStore()
-client = Client(intents=discord.Intents.default())
+if __name__ == "__main__":
+    server_store = ServerStore()
+    client = Client(intents=discord.Intents.default())
 
+    @client.event
+    async def on_ready():
+        print(f"Logged in as {client.user} (ID: {client.user.id})")
+        print("------")
 
-@client.event
-async def on_ready():
-    print(f"Logged in as {client.user} (ID: {client.user.id})")
-    print("------")
-
-
-@client.tree.command(name="add-server", description="Register a game server")
-@app_commands.describe(
-    host="Server IP or hostname",
-    name="Display name",
-    port="Connection port",
-    protocol="Query protocl",
-    query_host="Host used for status queries",
-    query_port="Port used for status queries",
-    embed_color="Hex embed color",
-    embed_icon="URL to icon image",
-    embed_image="URL to embed banner image",
-)
-async def add_server(
-    interaction: discord.Interaction,
-    host: str,
-    name: str,
-    port: int,
-    protocol: Protocol,
-    query_host: str,
-    query_port: int,
-    embed_color: str | None,
-    embed_icon: str | None,
-    embed_image: str | None,
-):
-    new_server = ServerConfig(
-        host,
-        name,
-        port,
-        protocol,
-        query_host,
-        query_port,
-        embed_color,
-        embed_icon,
-        None,
-        embed_image,
+    @client.tree.command(name="add-server", description="Register a game server")
+    @app_commands.describe(
+        host="Server IP or hostname",
+        name="Display name",
+        port="Connection port",
+        protocol="Query protocol",
+        query_host="Host used for status queries",
+        query_port="Port used for status queries",
+        embed_color="Hex embed color",
+        embed_icon="URL to icon image",
+        embed_image="URL to embed banner image",
     )
-    embed = ServerEmbed(new_server)
-    message = await client.channel.send(embed=embed)
-    new_server.embed_id = message.id
-    server_store.update(new_server)
+    async def add_server(
+        interaction: discord.Interaction,
+        host: str,
+        name: str,
+        port: int,
+        protocol: Protocol,
+        query_host: str,
+        query_port: int,
+        embed_color: str | None,
+        embed_icon: str | None,
+        embed_image: str | None,
+    ):
+        new_server = ServerConfig(
+            host,
+            name,
+            port,
+            protocol,
+            query_host,
+            query_port,
+            embed_color,
+            embed_icon,
+            None,
+            embed_image,
+        )
+        embed = ServerEmbed(new_server)
+        message = await client.channel.send(embed=embed)
+        new_server.embed_id = message.id
+        server_store.update(new_server)
 
-    await interaction.response.send_message(
-        f"Successfully created {new_server.name}!", ephemeral=True
-    )
+        await interaction.response.send_message(
+            f"Successfully created {new_server.name}!", ephemeral=True
+        )
 
+    missing_envs = [
+        e for e in ["BOT_TOKEN", "CHANNEL_ID", "GUILD_ID"] if not os.getenv(e)
+    ]
+    if missing_envs:
+        print(f"Error: missing env vars {', '.join(missing_envs)}")
+        sys.exit(1)
 
-missing_envs = [e for e in ["BOT_TOKEN", "CHANNEL_ID", "GUILD_ID"] if not os.getenv(e)]
-if missing_envs:
-    print(f"Error: missing env vars {', '.join(missing_envs)}")
-    sys.exit(1)
-
-client.run(os.getenv("BOT_TOKEN"))
+    client.run(os.getenv("BOT_TOKEN"))
