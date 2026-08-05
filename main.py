@@ -1,5 +1,6 @@
 import json
 import os
+import socket
 import sys
 from dataclasses import dataclass
 from enum import Enum
@@ -37,35 +38,41 @@ class ServerConfig:
 
 
 class ServerEmbed(discord.Embed):
-    """
-    The server embed should be built on init and update.
-    Sketch of object lifecycle:
-      1. ServerEmbed __init__ -> Build from server config
-      2. Query periodically for server status
-      3. If CURRENT ServerEmbed != NEW Query, NEW Query = ServerEmbed
-      4. If destroyed, destroy ServerEmbed and unregister from server_data.json. 
-         The admin shouldn't delete the embed via discord but from the app_command `Delete game server`
-      5. If the embed ID doesn't exist, send a new embed (?)
-
-    Open Questions brain dump:
-      - What happens if a server doesn't need querying: `protocol = NONE` ?
-      - How do we know which Servers to query?
-      - Are we selective about server queries or is it cheap?
-      - What differentates __init__ from build?
-      - Does a ServerEmbed need to be rebuilt after every query?
-        - Is it cheap or expensive?
-    """
-    ## TODO:= Resolve if needed -> **kwargs are for passing additional embed args without needing to enumerate them
-    def __init__(self, config: ServerConfig, **kwargs):
+    def __init__(self, config: ServerConfig):
         super().__init__()
-        await self.build(config=config)
 
-    async def query(self, address: str, port: int, protocol: Protocol):
+        self.add_field(name="Host", value=config.host)
+        self.add_field(name="Port", value=config.port)
+        self.add_field(name="Name", value=config.name)
+
+        self.set_footer(text=f"{config.host}:{config.port}")
+
+        self.set_image(url=config.embed_image)
+        self.set_thumbnail(url=config.embed_icon)
+
+
+    @classmethod
+    async def build(cls, config: ServerConfig):
+        self = cls(config)
+        await self._query(config.query_host, config.query_port, config.protocol)
+        if self.title is None:
+            print("warn: the game title was not fetched")
+            self.title = config.name
+        return self
+
+
+    async def _query(self, address: str, port: int, protocol: Protocol):
+        if protocol == Protocol.NONE:
+            return
+        elif protocol == Protocol.A2S:
         ## TODO:= Guards for A2S and verify query host is reachable
-        if protocol == Protocol.A2S:
             query_endpoint = (address, port)
-            info = a2s.info(query_endpoint)
-            rules = a2s.rules(query_endpoint)
+            try:
+                info = await a2s.ainfo(query_endpoint)
+                rules = await a2s.arules(query_endpoint)
+            except (socket.timeout, TimeoutError, ConnectionRefusedError, OSError, a2s.BrokenMessageError) as e:
+                print(f"warn - a2s: Failed to query {embed_id} {config.name} {address}:{port}")
+                return
             self.title = info.game
             self.add_field(
                 name="Players",
@@ -77,27 +84,12 @@ class ServerEmbed(discord.Embed):
             if info.game == "Project Zomboid":
                 self.add_field(name="Mod Count", value=rules["mod_count"])
                 self.add_field(name="Mods", value=rules["mods"])
-
-    async def build(self, config: ServerConfig):
-        self.set_thumbnail(url=config.embed_icon)
-        self.set_image(url=config.embed_image)
-
-        self.add_field(name="Host", value=config.host)
-        self.add_field(name="Port", value=config.port)
-        self.add_field(name="Name", value=config.name)
-
-        self.set_footer(text=f"{config.host}:{config.port}")
-
-        self.query(config.query_host, config.query_port, config.protocol)
-
-        if self.title is None:
-            print("warn: the game title was not fetched")
-            self.title = config.name
+        else:
+            print("warn: The protocol for server is unknown")
 
 
 class ServerStore:
     def __init__(self):
-        ## TODO:= Resolve if needed -> TypedDict of { ServerConfig } ?
         self.servers = {}
         try:
             with open(OUT_SERVER_DATA, "r") as f:
@@ -106,18 +98,20 @@ class ServerStore:
         except FileNotFoundError:
             print("Initializing new server_data...")
 
-    def __apply__(self):
+    def _apply(self):
         with open(OUT_TMP, "w") as f:
             json.dump(self.servers, f, indent=2)
         os.replace(OUT_TMP, OUT_SERVER_DATA)
 
     def delete(self, embed_id: str):
         self.servers.pop(embed_id)
-        self.__apply__()
+        self._apply()
 
     def update(self, config: ServerConfig):
         if config.embed_id is None:
             print("Cannot update the server, has the embed been sent?")
+            ## TODO:= Prompt if the user wants to create a server
+            ##        or show saved info to create new server
             return
         self.servers[str(config.embed_id)] = {
             "host": config.host,
@@ -131,7 +125,7 @@ class ServerStore:
             "embed_id": config.embed_id,
             "embed_image": config.embed_image,
         }
-        self.__apply__()
+        self._apply()
 
 
 class Client(discord.Client):
@@ -142,24 +136,34 @@ class Client(discord.Client):
         self.tree = app_commands.CommandTree(self)
 
     async def setup_hook(self):
-        guild = discord.Object(id=os.getenv("GUILD_ID"))
+        guild = discord.Object(id=int(os.getenv("GUILD_ID")))
         self.tree.copy_global_to(guild=guild)
         await self.tree.sync(guild=guild)
         self.channel = await self.fetch_channel(os.getenv("CHANNEL_ID"))
         self.query_loop.start()
 
-    @tasks.loop(seconds=os.getenv("PING_INTERVAL") or 60)
+    @tasks.loop(seconds=int(os.getenv("PING_INTERVAL", 60)))
     async def query_loop(self):
-        for embed_id, config in server_store.servers.items():
+        for embed_id, attrs in server_store.servers.items():
             try:
-                config = ServerConfig(**config)
-                embed = await ServerEmbed(config)
+                config = ServerConfig(
+                    host=attrs["host"],
+                    name=attrs["name"],
+                    port=int(attrs["port"]),
+                    protocol=Protocol(attrs["protocol"]),
+                    query_host=attrs["query_host"],
+                    query_port=int(attrs["query_port"]),
+                    embed_color=attrs["embed_color"],
+                    embed_icon=attrs["embed_icon"],
+                    embed_id=attrs["embed_id"],
+                    embed_image=attrs["embed_image"],
+                )
+                embed = await ServerEmbed.build(config)
                 ## TODO:= Edit the embed (create if it doesn't exist)
-                #message = await self.channel.send(embed)
-                #await message.edit(embed=embed)
-            ## TODO:= Blind exception for now, til I know which ones would actually occur
-            except Exception as e:  # noqa: BLE001
-                print(f"Failed to update {embed_id}, {config.name}: {e}")
+                # message = await self.channel.send(embed)
+                # await message.edit(embed=embed)
+            except (discord.HTTPException, KeyError, TypeError, ValueError) as e:
+                print(f"Failed to update {embed_id} {attrs.get('name', '?')}: {e}")
 
     @query_loop.before_loop
     async def before_query_loop(self):
@@ -181,8 +185,8 @@ if __name__ == "__main__":
         name="Display name",
         port="Connection port",
         protocol="Query protocol",
-        query_host="Host used for status queries",
-        query_port="Port used for status queries",
+        query_host="Host used for game query",
+        query_port="Port used for game  query",
         embed_color="Hex embed color",
         embed_icon="URL to icon image",
         embed_image="URL to embed banner image",
@@ -201,8 +205,8 @@ if __name__ == "__main__":
     ):
         new_server = ServerConfig(
             host,
-            name,
             port,
+            name,
             protocol,
             query_host,
             query_port,
@@ -211,7 +215,7 @@ if __name__ == "__main__":
             None,
             embed_image,
         )
-        embed = ServerEmbed(new_server)
+        embed = await ServerEmbed.build(new_server)
         message = await client.channel.send(embed=embed)
         new_server.embed_id = message.id
         server_store.update(new_server)
@@ -219,6 +223,8 @@ if __name__ == "__main__":
         await interaction.response.send_message(
             f"Successfully created {new_server.name}!", ephemeral=True
         )
+
+    ## TODO:= Edit, Delete Server right-click action
 
     missing_envs = [
         e for e in ["BOT_TOKEN", "CHANNEL_ID", "GUILD_ID"] if not os.getenv(e)

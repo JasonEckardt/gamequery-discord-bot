@@ -1,4 +1,11 @@
 .venv
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+
 *.json
 *.tmp.json
 .env
+
+.vscode/
