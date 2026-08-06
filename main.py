@@ -1,13 +1,17 @@
 import json
 import logging
 import os
+import random
 import sys
+import urllib
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
 
 import a2s
+import cv2
 import discord
+import numpy as np
 from discord import app_commands
 from discord.ext import tasks
 from dotenv import load_dotenv
@@ -45,47 +49,114 @@ class ServerConfig:
     query_host: str
     query_port: int
     embed_color: discord.Color
-    embed_icon: str | None
-    embed_id: str | None  ## none until the embed is sent
+    embed_id: str | None
     embed_image: str | None
+    embed_thumbnail: str | None
 
 
 class ServerEmbed(discord.Embed):
     def __init__(self, config: ServerConfig):
+        self.update = False
         super().__init__()
 
         ## TODO:= Maybe we shouldn't throw away the config
         ##        and instead keep save it as self.config?
         ##        This issue crops up in _query where warn does not know embed_id
 
-        self.add_field(name="Host", inline=False, value=config.host)
-        self.add_field(name="Port", inline=False, value=config.port)
-        self.add_field(name="Name", inline=False, value=config.name)
+        self.add_field(name="Host", value=config.host)
+        self.add_field(name="Port", value=config.port)
+        self.add_field(name="Name", value=config.name)
 
         ## TODO:= Replace embed_icon with status icon
         ##        green => online, grey => offline, yellow/amber => not queried
-        self.set_footer(icon_url=config.embed_icon, text=f"  • {config.host}:{config.port}")
+        ## TODO := env for repo owner? or github url? or just keep as is?
+        self.set_footer(
+            icon_url=f"https://raw.githubusercontent.com/JasonEckardt/gamequery-discord-bot/refs/heads/master/assets/status_icons/{current_status}.png",
+            text=f"  • {config.host}:{config.port}",
+        )
 
         self.set_image(url=config.embed_image)
 
         self.timestamp = datetime.now(timezone.utc)
 
-    ## TODO:= Don't rebuild the server embed if the server is offline
-    ##        This messes with timestamps
+        if config.embed_color:
+            self.color = discord.Color.from_str(color)
+        elif config.embed_image:
+            req = urllib.request.Request(
+                config.embed_image, headers={"User-Agent": "Mozilla/5.0"}
+            )
+            data = urllib.request.urlopen(req).read()
+            arr = np.frombuffer(data, dtype=np.uint8)
+            img = cv2.imdecode(arr, -1)
+            pixels = np.float32(img.reshape(-1, 3))
+
+            n_colors = 5
+            criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 200, 0.1)
+            flags = cv2.KMEANS_RANDOM_CENTERS
+
+            _, _, pallete = cv2.kmeans(pixels, n_colors, None, criteria, 10, flags)
+
+            def is_neutral(color):
+                b, g, r = color
+                saturation = max(r, g, b) - min(r, g, b)
+                brightness = (int(r) + int(g) + int(b)) / 3
+                return saturation < 30 or brightness > 200
+
+            vibrant = [c for c in pallete if not is_neutral(c)]
+            dominant = vibrant[0] if vibrant else pallete[0]
+
+            BRIGHT_FACTOR = 1.5
+            self.color = discord.Color.from_rgb(
+                min(255, int(dominant[2] * BRIGHT_FACTOR)),
+                min(255, int(dominant[1] * BRIGHT_FACTOR)),
+                min(255, int(dominant[0] * BRIGHT_FACTOR)),
+            )
+        else:
+            colors = [
+                discord.Color.brand_red(),
+                discord.Color.brand_green(),
+                discord.Color.og_blurple(),
+                discord.Color.blurple(),
+                discord.Color.greyple(),
+                discord.Color.fuchsia(),
+                discord.Color.yellow(),
+                discord.Color.dark_blue(),
+                discord.Color.dark_green(),
+                discord.Color.dark_red(),
+                discord.Color.dark_grey(),
+                discord.Color.light_grey(),
+                discord.Color.dark_magenta(),
+                discord.Color.dark_gold(),
+                discord.Color.dark_orange(),
+                discord.Color.dark_teal(),
+                discord.Color.teal(),
+                discord.Color.blue(),
+                discord.Color.green(),
+                discord.Color.purple(),
+                discord.Color.magenta(),
+                discord.Color.gold(),
+                discord.Color.orange(),
+                discord.Color.red(),
+            ]
+            self.color = random.choice(colors)
+
     @classmethod
     async def build(cls, config: ServerConfig):
         self = cls(config)
-        await self._query(config.query_host, config.query_port, config.protocol)
-        if self.title is None:
-            ## TODO:= We might not need this logger warning
-            logger.warning("The game title was not fetched")
+        res = await self._query(config.query_host, config.query_port, config.protocol)
+        self.update = res
+        if self.title is None or self.update:
             self.title = config.name
         return self
 
     ## TODO := Fail Query X times => Mark as offline, on next reconnect => Mark Online
-    async def _query(self, address: str, port: int, protocol: Protocol):
+    async def _query(self, address: str, port: int, protocol: Protocol) -> bool:
+        """
+        -> True: Rebuild embed
+        -> False: Don't rebuild embed
+        """
         if protocol == Protocol.NONE:
-            return
+            return False
         elif protocol == Protocol.A2S:
             query_endpoint = (address, port)
             try:
@@ -97,8 +168,10 @@ class ServerEmbed(discord.Embed):
                 OSError,
                 a2s.BrokenMessageError,
             ) as e:
-                logger.warning(f"a2s: Failed to query {address}:{port}, waiting X more times before marking offline: {e}")
-                return
+                logger.warning(
+                    f"a2s: Failed to query {address}:{port}, waiting X more times before marking offline: {e}"
+                )
+                return False
 
             self.timestamp = datetime.now(timezone.utc)
             self.title = info.game
@@ -116,8 +189,10 @@ class ServerEmbed(discord.Embed):
             logger.debug(
                 f"{address}:{port} ok: {info.game}, {info.player_count!s}/{info.max_players!s}"
             )
+            return True
         else:
             logger.warning("The protocol for host {address} is unknown")
+        return False
 
 
 class ServerStore:
@@ -143,21 +218,19 @@ class ServerStore:
 
     def update(self, config: ServerConfig):
         if config.embed_id is None:
-            print("Cannot update the server, has the embed been sent?")
-            ## TODO:= Prompt if the user wants to create a server
-            ##        or show saved info to create new server
+            logging.error(f"Cannot update {config.name}, missing embed_id")
             return
         self.servers[str(config.embed_id)] = {
             "host": config.host,
             "name": config.name,
-            "port": str(config.port),
+            "port": config.port,
             "query_host": config.query_host,
-            "query_port": str(config.query_port),
+            "query_port": config.query_port,
             "protocol": config.protocol.value,
             "embed_color": config.embed_color,
-            "embed_icon": config.embed_icon,
             "embed_id": config.embed_id,
             "embed_image": config.embed_image,
+            "embed_thumbnail": config.embed_thumbnail,
         }
         self._apply()
 
@@ -183,24 +256,27 @@ class Client(discord.Client):
                 config = ServerConfig(
                     host=attrs["host"],
                     name=attrs["name"],
-                    port=int(attrs["port"]),
+                    port=attrs["port"],
                     protocol=Protocol(attrs["protocol"]),
                     query_host=attrs["query_host"],
-                    query_port=int(attrs["query_port"]),
+                    query_port=attrs["query_port"],
                     embed_color=attrs["embed_color"],
-                    embed_icon=attrs["embed_icon"],
                     embed_id=attrs["embed_id"],
                     embed_image=attrs["embed_image"],
+                    embed_thumbnails=attrs["embed_thumbnails"],
                 )
                 embed = await ServerEmbed.build(config)
-                try:
-                    message = await self.channel.fetch_message(int(attrs["embed_id"]))
-                    await message.edit(embed=embed)
-                except discord.NotFound:
-                    message = await self.channel.send(embed=embed)
-                    server_store.delete(embed_id)
-                    config.embed_id = message.id
-                    server_store.update(config)
+                if embed.update == true:
+                    try:
+                        message = await self.channel.fetch_message(
+                            int(attrs["embed_id"])
+                        )
+                        await message.edit(embed=embed)
+                    except discord.NotFound:
+                        server_store.delete(embed_id)
+                        message = await self.channel.send(embed=embed)
+                        config.embed_id = message.id
+                        server_store.update(config)
             except (discord.HTTPException, KeyError, TypeError, ValueError) as e:
                 logger.error(
                     f"Failed to update {embed_id} {attrs.get('name', '?')}: {e}"
@@ -226,10 +302,10 @@ async def on_ready():
     port="Connection port",
     protocol="Query protocol",
     query_host="Host used for game query",
-    query_port="Port used for game  query",
+    query_port="Port used for game query",
     embed_color="Hex embed color",
-    embed_icon="URL to icon image",
-    embed_image="URL to embed banner image",
+    embed_image="URL to embed vertical grid banner",
+    embed_thumbnail="URL to game logo",
 )
 async def add_server(
     interaction: discord.Interaction,
@@ -240,8 +316,8 @@ async def add_server(
     query_host: str,
     query_port: int,
     embed_color: str | None,
-    embed_icon: str | None,
     embed_image: str | None,
+    embed_thumbnail: str | None,
 ):
     new_server = ServerConfig(
         host=host,
@@ -251,9 +327,9 @@ async def add_server(
         query_host=query_host,
         query_port=query_port,
         embed_color=embed_color,
-        embed_icon=embed_icon,
         embed_id=None,
         embed_image=embed_image,
+        embed_thumbnail=embed_thumbnail,
     )
     embed = await ServerEmbed.build(new_server)
     message = await client.channel.send(embed=embed)

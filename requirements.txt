@@ -7,6 +7,8 @@ frozenlist==1.8.0
 idna==3.18
 iniconfig==2.3.0
 multidict==6.7.1
+numpy==2.5.1
+opencv-python==5.0.0.93
 packaging==26.3
 pluggy==1.6.0
 propcache==0.5.2
