@@ -11,6 +11,8 @@ from discord import app_commands
 from discord.ext import tasks
 from dotenv import load_dotenv
 
+from datetime import datetime, timezone
+
 load_dotenv()
 
 OUT_TMP = "./server_data.tmp.json"
@@ -41,15 +43,19 @@ class ServerEmbed(discord.Embed):
     def __init__(self, config: ServerConfig):
         super().__init__()
 
+        ## TODO:= Maybe we shouldn't throw away the config
+        ##        and instead keep save it as self.config?
+        ##        This issue crops up in _query where warn does not know embed_id
+
         self.add_field(name="Host", value=config.host)
         self.add_field(name="Port", value=config.port)
         self.add_field(name="Name", value=config.name)
 
-        self.set_footer(text=f"{config.host}:{config.port}")
+        self.set_footer(icon_url=config.embed_icon, text=f"{config.host}:{config.port}")
 
         self.set_image(url=config.embed_image)
-        self.set_thumbnail(url=config.embed_icon)
 
+        self.timestamp = datetime.now(timezone.utc)
 
     @classmethod
     async def build(cls, config: ServerConfig):
@@ -60,19 +66,24 @@ class ServerEmbed(discord.Embed):
             self.title = config.name
         return self
 
-
     async def _query(self, address: str, port: int, protocol: Protocol):
         if protocol == Protocol.NONE:
             return
         elif protocol == Protocol.A2S:
-        ## TODO:= Guards for A2S and verify query host is reachable
             query_endpoint = (address, port)
             try:
                 info = await a2s.ainfo(query_endpoint)
                 rules = await a2s.arules(query_endpoint)
-            except (socket.timeout, TimeoutError, ConnectionRefusedError, OSError, a2s.BrokenMessageError) as e:
-                print(f"warn - a2s: Failed to query {embed_id} {config.name} {address}:{port}")
+            except (
+                TimeoutError,
+                ConnectionRefusedError,
+                OSError,
+                a2s.BrokenMessageError,
+            ) as e:
+                print(f"warn - a2s: Failed to query {address}:{port} : {e}")
                 return
+
+            self.timestamp = datetime.now(timezone.utc)
             self.title = info.game
             self.add_field(
                 name="Players",
@@ -139,12 +150,12 @@ class Client(discord.Client):
         guild = discord.Object(id=int(os.getenv("GUILD_ID")))
         self.tree.copy_global_to(guild=guild)
         await self.tree.sync(guild=guild)
-        self.channel = await self.fetch_channel(os.getenv("CHANNEL_ID"))
+        self.channel = await self.fetch_channel(int(os.getenv("CHANNEL_ID")))
         self.query_loop.start()
 
     @tasks.loop(seconds=int(os.getenv("PING_INTERVAL", 60)))
     async def query_loop(self):
-        for embed_id, attrs in server_store.servers.items():
+        for embed_id, attrs in list(server_store.servers.items()):
             try:
                 config = ServerConfig(
                     host=attrs["host"],
@@ -159,9 +170,14 @@ class Client(discord.Client):
                     embed_image=attrs["embed_image"],
                 )
                 embed = await ServerEmbed.build(config)
-                ## TODO:= Edit the embed (create if it doesn't exist)
-                # message = await self.channel.send(embed)
-                # await message.edit(embed=embed)
+                try:
+                    message = await self.channel.fetch_message(int(attrs["embed_id"]))
+                    await message.edit(embed=embed)
+                except discord.NotFound:
+                    message = await self.channel.send(embed=embed)
+                    server_store.delete(embed_id)
+                    config.embed_id = message.id
+                    server_store.update(config)
             except (discord.HTTPException, KeyError, TypeError, ValueError) as e:
                 print(f"Failed to update {embed_id} {attrs.get('name', '?')}: {e}")
 
@@ -170,61 +186,65 @@ class Client(discord.Client):
         await self.wait_until_ready()
 
 
+client = Client(intents=discord.Intents.default())
+
+
+@client.event
+async def on_ready():
+    print(f"Logged in as {client.user} (ID: {client.user.id})")
+    print("------")
+
+
+@client.tree.command(name="add-server", description="Register a game server")
+@app_commands.describe(
+    name="Display name",
+    host="Server IP or hostname",
+    port="Connection port",
+    protocol="Query protocol",
+    query_host="Host used for game query",
+    query_port="Port used for game  query",
+    embed_color="Hex embed color",
+    embed_icon="URL to icon image",
+    embed_image="URL to embed banner image",
+)
+async def add_server(
+    interaction: discord.Interaction,
+    name: str,
+    host: str,
+    port: int,
+    protocol: Protocol,
+    query_host: str,
+    query_port: int,
+    embed_color: str | None,
+    embed_icon: str | None,
+    embed_image: str | None,
+):
+    new_server = ServerConfig(
+        host=host,
+        name=name,
+        port=port,
+        protocol=protocol,
+        query_host=query_host,
+        query_port=query_port,
+        embed_color=embed_color,
+        embed_icon=embed_icon,
+        embed_id=None,
+        embed_image=embed_image,
+    )
+    embed = await ServerEmbed.build(new_server)
+    message = await client.channel.send(embed=embed)
+    new_server.embed_id = message.id
+    server_store.update(new_server)
+
+    await interaction.response.send_message(
+        f"Successfully created {new_server.name}!", ephemeral=True
+    )
+
+
+## TODO:= Edit, Delete Server right-click action
+
 if __name__ == "__main__":
     server_store = ServerStore()
-    client = Client(intents=discord.Intents.default())
-
-    @client.event
-    async def on_ready():
-        print(f"Logged in as {client.user} (ID: {client.user.id})")
-        print("------")
-
-    @client.tree.command(name="add-server", description="Register a game server")
-    @app_commands.describe(
-        host="Server IP or hostname",
-        name="Display name",
-        port="Connection port",
-        protocol="Query protocol",
-        query_host="Host used for game query",
-        query_port="Port used for game  query",
-        embed_color="Hex embed color",
-        embed_icon="URL to icon image",
-        embed_image="URL to embed banner image",
-    )
-    async def add_server(
-        interaction: discord.Interaction,
-        host: str,
-        name: str,
-        port: int,
-        protocol: Protocol,
-        query_host: str,
-        query_port: int,
-        embed_color: str | None,
-        embed_icon: str | None,
-        embed_image: str | None,
-    ):
-        new_server = ServerConfig(
-            host,
-            port,
-            name,
-            protocol,
-            query_host,
-            query_port,
-            embed_color,
-            embed_icon,
-            None,
-            embed_image,
-        )
-        embed = await ServerEmbed.build(new_server)
-        message = await client.channel.send(embed=embed)
-        new_server.embed_id = message.id
-        server_store.update(new_server)
-
-        await interaction.response.send_message(
-            f"Successfully created {new_server.name}!", ephemeral=True
-        )
-
-    ## TODO:= Edit, Delete Server right-click action
 
     missing_envs = [
         e for e in ["BOT_TOKEN", "CHANNEL_ID", "GUILD_ID"] if not os.getenv(e)
