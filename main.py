@@ -70,6 +70,7 @@ class ServerEmbed(discord.Embed):
         ## TODO:= Replace embed_icon with status icon
         ##        green => online, grey => offline, yellow/amber => not queried
         ## TODO := env for repo owner? or github url? or just keep as is?
+        current_status = "notqueried"
         self.set_footer(
             icon_url=f"https://raw.githubusercontent.com/JasonEckardt/gamequery-discord-bot/refs/heads/master/assets/status_icons/{current_status}.png",
             text=f"  • {config.host}:{config.port}",
@@ -80,7 +81,7 @@ class ServerEmbed(discord.Embed):
         self.timestamp = datetime.now(timezone.utc)
 
         if config.embed_color:
-            self.color = discord.Color.from_str(color)
+            self.color = discord.Color.from_str(config.embed_color)
         elif config.embed_image:
             req = urllib.request.Request(
                 config.embed_image, headers={"User-Agent": "Mozilla/5.0"}
@@ -218,7 +219,7 @@ class ServerStore:
 
     def update(self, config: ServerConfig):
         if config.embed_id is None:
-            logging.error(f"Cannot update {config.name}, missing embed_id")
+            logger.error(f"Cannot update {config.name}, missing embed_id")
             return
         self.servers[str(config.embed_id)] = {
             "host": config.host,
@@ -249,7 +250,7 @@ class Client(discord.Client):
         self.channel = await self.fetch_channel(int(os.getenv("CHANNEL_ID")))
         self.query_loop.start()
 
-    @tasks.loop(seconds=int(os.getenv("PING_INTERVAL", 60)))
+    @tasks.loop(seconds=int(os.getenv("PING_INTERVAL", "60")))
     async def query_loop(self):
         for embed_id, attrs in list(server_store.servers.items()):
             try:
@@ -266,7 +267,7 @@ class Client(discord.Client):
                     embed_thumbnails=attrs["embed_thumbnails"],
                 )
                 embed = await ServerEmbed.build(config)
-                if embed.update == true:
+                if embed.update:
                     try:
                         message = await self.channel.fetch_message(
                             int(attrs["embed_id"])
