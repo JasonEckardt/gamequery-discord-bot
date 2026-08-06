@@ -21,6 +21,9 @@ load_dotenv()
 OUT_TMP = "./server_data.tmp.json"
 OUT_SERVER_DATA = "./server_data.json"
 
+## TODO:= Move into .env
+MAX_RETRIES = 3
+
 discord.utils.setup_logging(
     level=os.getenv("LOG_LEVEL", "INFO"),
     root=True,
@@ -36,10 +39,13 @@ class Protocol(Enum):
     NONE = "none"
 
 
-## TODO:= Replace embed_icon with embed_thumbnail
-##        embed_thumbnail will be the game logo
-##        embed_icon is queried via Steam page, so we will not need this manual field
-## TODO:= A mod collection link would be nice: [Mod Collection](link to mod collection)
+class ServerStatus(Enum):
+    OFFLINE = "offline"
+    ONLINE = "online"
+    PENDING = "pending"
+
+
+## todo_optional: A mod collection link would be nice: [Mod Collection](link to mod collection)
 @dataclass
 class ServerConfig:
     host: str
@@ -56,35 +62,40 @@ class ServerConfig:
 
 class ServerEmbed(discord.Embed):
     def __init__(self, config: ServerConfig):
+        self.config = config
+        self.status = ServerStatus.PENDING
+        self.tries = 0
         self.update = False
         super().__init__()
-
-        ## TODO:= Maybe we shouldn't throw away the config
-        ##        and instead keep save it as self.config?
-        ##        This issue crops up in _query where warn does not know embed_id
 
         self.add_field(name="Host", value=config.host)
         self.add_field(name="Port", value=config.port)
         self.add_field(name="Name", value=config.name)
 
-        ## TODO:= Replace embed_icon with status icon
-        ##        green => online, grey => offline, yellow/amber => not queried
         ## TODO := env for repo owner? or github url? or just keep as is?
-        current_status = "notqueried"
+        ## green => online, grey => offline, yellow/amber => not queried
         self.set_footer(
-            icon_url=f"https://raw.githubusercontent.com/JasonEckardt/gamequery-discord-bot/refs/heads/master/assets/status_icons/{current_status}.png",
+            icon_url=f"https://raw.githubusercontent.com/JasonEckardt/gamequery-discord-bot/refs/heads/master/assets/status_icons/{self.status}.png",
             text=f"  • {config.host}:{config.port}",
         )
 
         self.set_image(url=config.embed_image)
+        self.set_thumbnail(url=config.embed_thumbnail)
 
         self.timestamp = datetime.now(timezone.utc)
 
         if config.embed_color:
             self.color = discord.Color.from_str(config.embed_color)
-        elif config.embed_image:
+        elif config.embed_image or config.embed_thumbnail:
+            if config.embed_image:
+                request_img = config.embed_image
+            elif config.embed_thumbnail:
+                request_img = config.embed_thumbnail
+            else:
+                return
+
             req = urllib.request.Request(
-                config.embed_image, headers={"User-Agent": "Mozilla/5.0"}
+                request_img, headers={"User-Agent": "Mozilla/5.0"}
             )
             data = urllib.request.urlopen(req).read()
             arr = np.frombuffer(data, dtype=np.uint8)
@@ -150,7 +161,6 @@ class ServerEmbed(discord.Embed):
             self.title = config.name
         return self
 
-    ## TODO := Fail Query X times => Mark as offline, on next reconnect => Mark Online
     async def _query(self, address: str, port: int, protocol: Protocol) -> bool:
         """
         -> True: Rebuild embed
@@ -169,9 +179,14 @@ class ServerEmbed(discord.Embed):
                 OSError,
                 a2s.BrokenMessageError,
             ) as e:
+                if self.tries >= MAX_RETRIES:
+                    self.status = ServerStatus.offline
+                    ## Just return whatever update was at
+                    return self.update
                 logger.warning(
                     f"a2s: Failed to query {address}:{port}, waiting X more times before marking offline: {e}"
                 )
+                self.status = ServerStatus.pending
                 return False
 
             self.timestamp = datetime.now(timezone.utc)
@@ -190,6 +205,8 @@ class ServerEmbed(discord.Embed):
             logger.debug(
                 f"{address}:{port} ok: {info.game}, {info.player_count!s}/{info.max_players!s}"
             )
+            self.status = ServerStatus.online
+            self.tries = 0
             return True
         else:
             logger.warning("The protocol for host {address} is unknown")
