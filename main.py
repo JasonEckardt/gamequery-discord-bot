@@ -1,8 +1,9 @@
 import json
+import logging
 import os
-import socket
 import sys
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from enum import Enum
 
 import a2s
@@ -11,12 +12,18 @@ from discord import app_commands
 from discord.ext import tasks
 from dotenv import load_dotenv
 
-from datetime import datetime, timezone
-
 load_dotenv()
 
 OUT_TMP = "./server_data.tmp.json"
 OUT_SERVER_DATA = "./server_data.json"
+
+discord.utils.setup_logging(
+    level=os.getenv("LOG_LEVEL", "INFO"),
+    root=True,
+)
+
+logger = logging.getLogger(__name__)
+logging.getLogger("discord.client").setLevel(logging.ERROR)
 
 
 class Protocol(Enum):
@@ -62,7 +69,7 @@ class ServerEmbed(discord.Embed):
         self = cls(config)
         await self._query(config.query_host, config.query_port, config.protocol)
         if self.title is None:
-            print("warn: the game title was not fetched")
+            logger.warning("The game title was not fetched")
             self.title = config.name
         return self
 
@@ -80,7 +87,7 @@ class ServerEmbed(discord.Embed):
                 OSError,
                 a2s.BrokenMessageError,
             ) as e:
-                print(f"warn - a2s: Failed to query {address}:{port} : {e}")
+                logger.warning(f"a2s: Failed to query {address}:{port} : {e}")
                 return
 
             self.timestamp = datetime.now(timezone.utc)
@@ -95,8 +102,11 @@ class ServerEmbed(discord.Embed):
             if info.game == "Project Zomboid":
                 self.add_field(name="Mod Count", value=rules["mod_count"])
                 self.add_field(name="Mods", value=rules["mods"])
+            logger.debug(
+                f"{address}:{port} ok: {info.game}, {info.player_count!s}/{info.max_players!s}"
+            )
         else:
-            print("warn: The protocol for server is unknown")
+            logger.warning("The protocol for host {address} is unknown")
 
 
 class ServerStore:
@@ -105,9 +115,11 @@ class ServerStore:
         try:
             with open(OUT_SERVER_DATA, "r") as f:
                 self.servers = json.load(f)
-                print("Found server config:\n", json.dumps(self.servers, indent=2))
+                logger.info(
+                    f"Found server config:\n {json.dumps(self.servers, indent=2)}"
+                )
         except FileNotFoundError:
-            print("Initializing new server_data...")
+            logger.info("Initializing new server_data...")
 
     def _apply(self):
         with open(OUT_TMP, "w") as f:
@@ -179,7 +191,9 @@ class Client(discord.Client):
                     config.embed_id = message.id
                     server_store.update(config)
             except (discord.HTTPException, KeyError, TypeError, ValueError) as e:
-                print(f"Failed to update {embed_id} {attrs.get('name', '?')}: {e}")
+                logger.error(
+                    f"Failed to update {embed_id} {attrs.get('name', '?')}: {e}"
+                )
 
     @query_loop.before_loop
     async def before_query_loop(self):
@@ -191,8 +205,7 @@ client = Client(intents=discord.Intents.default())
 
 @client.event
 async def on_ready():
-    print(f"Logged in as {client.user} (ID: {client.user.id})")
-    print("------")
+    logger.info(f"Logged in as {client.user} (ID: {client.user.id})")
 
 
 @client.tree.command(name="add-server", description="Register a game server")
@@ -250,7 +263,7 @@ if __name__ == "__main__":
         e for e in ["BOT_TOKEN", "CHANNEL_ID", "GUILD_ID"] if not os.getenv(e)
     ]
     if missing_envs:
-        print(f"Error: missing env vars {', '.join(missing_envs)}")
+        logger.error(f"Error: missing env vars {', '.join(missing_envs)}")
         sys.exit(1)
 
-    client.run(os.getenv("BOT_TOKEN"))
+    client.run(os.getenv("BOT_TOKEN"), log_handler=None)
