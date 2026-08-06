@@ -32,6 +32,10 @@ class Protocol(Enum):
     NONE = "none"
 
 
+## TODO:= Replace embed_icon with embed_thumbnail
+##        embed_thumbnail will be the game logo
+##        embed_icon is queried via Steam page, so we will not need this manual field
+## TODO:= A mod collection link would be nice: [Mod Collection](link to mod collection)
 @dataclass
 class ServerConfig:
     host: str
@@ -54,25 +58,31 @@ class ServerEmbed(discord.Embed):
         ##        and instead keep save it as self.config?
         ##        This issue crops up in _query where warn does not know embed_id
 
-        self.add_field(name="Host", value=config.host)
-        self.add_field(name="Port", value=config.port)
-        self.add_field(name="Name", value=config.name)
+        self.add_field(name="Host", inline=False, value=config.host)
+        self.add_field(name="Port", inline=False, value=config.port)
+        self.add_field(name="Name", inline=False, value=config.name)
 
-        self.set_footer(icon_url=config.embed_icon, text=f"{config.host}:{config.port}")
+        ## TODO:= Replace embed_icon with status icon
+        ##        green => online, grey => offline, yellow/amber => not queried
+        self.set_footer(icon_url=config.embed_icon, text=f"  • {config.host}:{config.port}")
 
         self.set_image(url=config.embed_image)
 
         self.timestamp = datetime.now(timezone.utc)
 
+    ## TODO:= Don't rebuild the server embed if the server is offline
+    ##        This messes with timestamps
     @classmethod
     async def build(cls, config: ServerConfig):
         self = cls(config)
         await self._query(config.query_host, config.query_port, config.protocol)
         if self.title is None:
+            ## TODO:= We might not need this logger warning
             logger.warning("The game title was not fetched")
             self.title = config.name
         return self
 
+    ## TODO := Fail Query X times => Mark as offline, on next reconnect => Mark Online
     async def _query(self, address: str, port: int, protocol: Protocol):
         if protocol == Protocol.NONE:
             return
@@ -87,7 +97,7 @@ class ServerEmbed(discord.Embed):
                 OSError,
                 a2s.BrokenMessageError,
             ) as e:
-                logger.warning(f"a2s: Failed to query {address}:{port} : {e}")
+                logger.warning(f"a2s: Failed to query {address}:{port}, waiting X more times before marking offline: {e}")
                 return
 
             self.timestamp = datetime.now(timezone.utc)
@@ -99,9 +109,10 @@ class ServerEmbed(discord.Embed):
             self.add_field(name="Game Version", value=info.version)
             if info.game == "Abiotic Factor":
                 self.add_field(name="Story Progress", value=rules["StoryProgress_s"])
+            ## TODO:= Parse rules['mods'] and display it nicer, either bullet newline or seperated
             if info.game == "Project Zomboid":
-                self.add_field(name="Mod Count", value=rules["mod_count"])
-                self.add_field(name="Mods", value=rules["mods"])
+                self.add_field(name="Mod Count", value=rules["modCount"])
+                self.add_field(name="Mods", inline=False, value=rules["mods"])
             logger.debug(
                 f"{address}:{port} ok: {info.game}, {info.player_count!s}/{info.max_players!s}"
             )
