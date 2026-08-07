@@ -61,23 +61,15 @@ class ServerConfig:
 
 
 class ServerEmbed(discord.Embed):
-    def __init__(self, config: ServerConfig):
-        self.config = config
+    def __init__(self, config: ServerConfig, tries: int = 0):
         self.status = ServerStatus.PENDING
-        self.tries = 0
+        self.tries = tries
         self.update = False
         super().__init__()
 
         self.add_field(name="Host", value=config.host)
         self.add_field(name="Port", value=config.port)
         self.add_field(name="Name", value=config.name)
-
-        ## TODO := env for repo owner? or github url? or just keep as is?
-        ## green => online, grey => offline, yellow/amber => not queried
-        self.set_footer(
-            icon_url=f"https://raw.githubusercontent.com/JasonEckardt/gamequery-discord-bot/refs/heads/master/assets/status_icons/{self.status}.png",
-            text=f"  •  {config.host}:{config.port}",
-        )
 
         self.set_image(url=config.embed_image)
         self.set_thumbnail(url=config.embed_thumbnail)
@@ -153,15 +145,25 @@ class ServerEmbed(discord.Embed):
             self.color = random.choice(colors)
 
     @classmethod
-    async def build(cls, config: ServerConfig):
-        self = cls(config)
-        res = await self._query(config.query_host, config.query_port, config.protocol)
+    async def build(cls, config: ServerConfig, tries: int = 0) -> discord.Embed:
+        self = cls(config, tries)
+        res = await self._query(
+            config.query_host, config.query_port, config.protocol, config.name
+        )
         self.update = res
         if self.title is None and self.update:
             self.title = config.name
+        ## TODO := env for repo owner? or github url? or just keep as is?
+        ## green => online, grey => offline, yellow/amber => not queried
+        self.set_footer(
+            icon_url=f"https://raw.githubusercontent.com/JasonEckardt/gamequery-discord-bot/refs/heads/master/assets/status_icons/{self.status}.png",
+            text=f"  •  {config.host}:{config.port}",
+        )
         return self
 
-    async def _query(self, address: str, port: int, protocol: Protocol) -> bool:
+    async def _query(
+        self, address: str, port: int, protocol: Protocol, name: str
+    ) -> bool:
         """
         -> True: Rebuild embed
         -> False: Don't rebuild embed
@@ -179,13 +181,12 @@ class ServerEmbed(discord.Embed):
                 OSError,
                 a2s.BrokenMessageError,
             ) as e:
+                self.tries += 1
                 if self.tries >= MAX_RETRIES:
-                    self.tries += 1
                     self.status = ServerStatus.OFFLINE
-                    ## Just return whatever update was at
                     return self.update
                 logger.warning(
-                    f"a2s: Failed to query {address}:{port}, waiting {MAX_RETRIES - self.tries} more times before marking offline: {e}"
+                    f"a2s: Failed to query {name} - {address}:{port}, waiting {MAX_RETRIES - self.tries} more times before marking offline: {e}"
                 )
                 self.status = ServerStatus.PENDING
                 return False
@@ -303,7 +304,9 @@ class Client(discord.Client):
                     embed_image=attrs["embed_image"],
                     embed_thumbnail=attrs["embed_thumbnail"],
                 )
-                embed = await ServerEmbed.build(config)
+                embed = await ServerEmbed.build(config, tries=attrs.get("tries", 0))
+                attrs["tries"] = embed.tries
+                attrs["status"] = embed.status.value
                 if embed.update:
                     try:
                         message = await self.channel.fetch_message(
