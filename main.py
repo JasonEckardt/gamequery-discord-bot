@@ -76,7 +76,7 @@ class ServerEmbed(discord.Embed):
         ## green => online, grey => offline, yellow/amber => not queried
         self.set_footer(
             icon_url=f"https://raw.githubusercontent.com/JasonEckardt/gamequery-discord-bot/refs/heads/master/assets/status_icons/{self.status}.png",
-            text=f"  • {config.host}:{config.port}",
+            text=f"  •  {config.host}:{config.port}",
         )
 
         self.set_image(url=config.embed_image)
@@ -157,7 +157,7 @@ class ServerEmbed(discord.Embed):
         self = cls(config)
         res = await self._query(config.query_host, config.query_port, config.protocol)
         self.update = res
-        if self.title is None or self.update:
+        if self.title is None and self.update:
             self.title = config.name
         return self
 
@@ -180,13 +180,14 @@ class ServerEmbed(discord.Embed):
                 a2s.BrokenMessageError,
             ) as e:
                 if self.tries >= MAX_RETRIES:
-                    self.status = ServerStatus.offline
+                    self.tries += 1
+                    self.status = ServerStatus.OFFLINE
                     ## Just return whatever update was at
                     return self.update
                 logger.warning(
-                    f"a2s: Failed to query {address}:{port}, waiting X more times before marking offline: {e}"
+                    f"a2s: Failed to query {address}:{port}, waiting {MAX_RETRIES - self.tries} more times before marking offline: {e}"
                 )
-                self.status = ServerStatus.pending
+                self.status = ServerStatus.PENDING
                 return False
 
             self.timestamp = datetime.now(timezone.utc)
@@ -205,7 +206,7 @@ class ServerEmbed(discord.Embed):
             logger.debug(
                 f"{address}:{port} ok: {info.game}, {info.player_count!s}/{info.max_players!s}"
             )
-            self.status = ServerStatus.online
+            self.status = ServerStatus.ONLINE
             self.tries = 0
             return True
         else:
@@ -220,10 +221,10 @@ class ServerStore:
             with open(OUT_SERVER_DATA, "r") as f:
                 self.servers = json.load(f)
                 logger.info(
-                    f"Found server config:\n {json.dumps(self.servers, indent=2)}"
+                    f"Found server store:\n {json.dumps(self.servers, indent=2)}"
                 )
         except FileNotFoundError:
-            logger.info("Initializing new server_data...")
+            logger.info("Initialize new server data store")
 
     def _apply(self):
         with open(OUT_TMP, "w") as f:
@@ -259,6 +260,25 @@ class Client(discord.Client):
     def __init__(self, *, intents: discord.Intents):
         super().__init__(intents=intents)
         self.tree = app_commands.CommandTree(self)
+        self.tree.on_error = self.on_tree_error
+
+    async def on_tree_error(
+        self,
+        interaction: discord.Interaction,
+        error: app_commands.AppCommandError,
+    ):
+        logger.error(
+            f"Unhandled error in command '{interaction.command.name if interaction.command else '?'}': {error}",
+            exc_info=error,
+        )
+        message = "Something went wrong running that command."
+        try:
+            if interaction.response.is_done():
+                await interaction.followup.send(message, ephemeral=True)
+            else:
+                await interaction.response.send_message(message, ephemeral=True)
+        except discord.HTTPException:
+            pass
 
     async def setup_hook(self):
         guild = discord.Object(id=int(os.getenv("GUILD_ID")))
@@ -281,7 +301,7 @@ class Client(discord.Client):
                     embed_color=attrs["embed_color"],
                     embed_id=attrs["embed_id"],
                     embed_image=attrs["embed_image"],
-                    embed_thumbnails=attrs["embed_thumbnails"],
+                    embed_thumbnail=attrs["embed_thumbnail"],
                 )
                 embed = await ServerEmbed.build(config)
                 if embed.update:
@@ -337,6 +357,15 @@ async def add_server(
     embed_image: str | None,
     embed_thumbnail: str | None,
 ):
+    await interaction.response.defer(ephemeral=True)
+
+    if embed_color:
+        embed_color = embed_color.strip()
+        if not embed_color.startswith(("#", "0x")) and not embed_color.startswith(
+            "rgb("
+        ):
+            embed_color = f"#{embed_color}"
+
     new_server = ServerConfig(
         host=host,
         name=name,
@@ -354,7 +383,7 @@ async def add_server(
     new_server.embed_id = message.id
     server_store.update(new_server)
 
-    await interaction.response.send_message(
+    await interaction.followup.send(
         f"Successfully created {new_server.name}!", ephemeral=True
     )
 
