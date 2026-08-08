@@ -7,6 +7,8 @@ import urllib
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
+from typing import ClassVar
+from urllib import error, parse, request
 
 import a2s
 import cv2
@@ -21,8 +23,7 @@ load_dotenv()
 OUT_TMP = "./server_data.tmp.json"
 OUT_SERVER_DATA = "./server_data.json"
 
-## TODO:= Move into .env
-MAX_RETRIES = 3
+MAX_RETRIES = int(os.getenv("MAX_RETRIES", "3"))
 
 discord.utils.setup_logging(
     level=os.getenv("LOG_LEVEL", "INFO"),
@@ -34,26 +35,27 @@ logging.getLogger("discord.client").setLevel(logging.ERROR)
 
 
 class Protocol(Enum):
-    A2S = "a2s"
-    MC_QUERY = "minecraft_query"
-    NONE = "none"
+    A2S = "A2S"
+    MINECRAFT = "Minecraft"
+    NONE = "None"
 
 
 class ServerStatus(Enum):
-    OFFLINE = "offline"
-    ONLINE = "online"
-    PENDING = "pending"
+    OFFLINE = "Offline"
+    ONLINE = "Online"
+    PENDING = "Pending"
+    UNQUERIED = "Unqueried"
 
 
-## todo_optional: A mod collection link would be nice: [Mod Collection](link to mod collection)
+## optional todo:= A mod collection link would be nice: [Mod Collection](link to mod collection)
 @dataclass
 class ServerConfig:
     host: str
     name: str
     port: int
     protocol: Protocol
-    query_host: str
-    query_port: int
+    query_host: str | None
+    query_port: int | None
     embed_color: discord.Color
     embed_id: str | None
     embed_image: str | None
@@ -61,6 +63,33 @@ class ServerConfig:
 
 
 class ServerEmbed(discord.Embed):
+    _RANDOM_EMBED_COLORS: ClassVar[list[discord.Color]] = [
+        discord.Color.brand_red(),
+        discord.Color.brand_green(),
+        discord.Color.og_blurple(),
+        discord.Color.blurple(),
+        discord.Color.greyple(),
+        discord.Color.fuchsia(),
+        discord.Color.yellow(),
+        discord.Color.dark_blue(),
+        discord.Color.dark_green(),
+        discord.Color.dark_red(),
+        discord.Color.dark_grey(),
+        discord.Color.light_grey(),
+        discord.Color.dark_magenta(),
+        discord.Color.dark_gold(),
+        discord.Color.dark_orange(),
+        discord.Color.dark_teal(),
+        discord.Color.teal(),
+        discord.Color.blue(),
+        discord.Color.green(),
+        discord.Color.purple(),
+        discord.Color.magenta(),
+        discord.Color.gold(),
+        discord.Color.orange(),
+        discord.Color.red(),
+    ]
+
     def __init__(self, config: ServerConfig, tries: int = 0):
         self.status = ServerStatus.PENDING
         self.tries = tries
@@ -76,100 +105,98 @@ class ServerEmbed(discord.Embed):
 
         self.timestamp = datetime.now(timezone.utc)
 
+        request_img = None
         if config.embed_color:
             self.color = discord.Color.from_str(config.embed_color)
         elif config.embed_image or config.embed_thumbnail:
-            if config.embed_image:
-                request_img = config.embed_image
-            elif config.embed_thumbnail:
-                request_img = config.embed_thumbnail
-            else:
-                return
+            request_img = config.embed_image or config.embed_thumbnail
 
-            req = urllib.request.Request(
-                request_img, headers={"User-Agent": "Mozilla/5.0"}
-            )
-            data = urllib.request.urlopen(req).read()
-            arr = np.frombuffer(data, dtype=np.uint8)
-            img = cv2.imdecode(arr, -1)
-            pixels = np.float32(img.reshape(-1, 3))
+        if request_img is not None:
+            try:
+                req = request.Request(
+                    request_img, headers={"User-Agent": "Mozilla/5.0"}
+                )
+                data = request.urlopen(req, timeout=10).read()
+                arr = np.frombuffer(data, dtype=np.uint8)
+                img = cv2.imdecode(arr, -1)
+                if img is None:
+                    raise ValueError(
+                        f"Could not decode image data from '{request_img}'"
+                    )
+                pixels = np.float32(img.reshape(-1, 3))
 
-            n_colors = 5
-            criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 200, 0.1)
-            flags = cv2.KMEANS_RANDOM_CENTERS
+                n_colors = 5
+                criteria = (
+                    cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER,
+                    200,
+                    0.1,
+                )
+                flags = cv2.KMEANS_RANDOM_CENTERS
 
-            _, _, pallete = cv2.kmeans(pixels, n_colors, None, criteria, 10, flags)
+                _, _, pallete = cv2.kmeans(pixels, n_colors, None, criteria, 10, flags)
 
-            def is_neutral(color):
-                b, g, r = color
-                saturation = max(r, g, b) - min(r, g, b)
-                brightness = (int(r) + int(g) + int(b)) / 3
-                return saturation < 30 or brightness > 200
+                def is_neutral(color):
+                    b, g, r = color
+                    saturation = max(r, g, b) - min(r, g, b)
+                    brightness = (int(r) + int(g) + int(b)) / 3
+                    return saturation < 30 or brightness > 200
 
-            vibrant = [c for c in pallete if not is_neutral(c)]
-            dominant = vibrant[0] if vibrant else pallete[0]
+                vibrant = [c for c in pallete if not is_neutral(c)]
+                dominant = vibrant[0] if vibrant else pallete[0]
 
-            BRIGHT_FACTOR = 1.5
-            self.color = discord.Color.from_rgb(
-                min(255, int(dominant[2] * BRIGHT_FACTOR)),
-                min(255, int(dominant[1] * BRIGHT_FACTOR)),
-                min(255, int(dominant[0] * BRIGHT_FACTOR)),
-            )
-        else:
-            colors = [
-                discord.Color.brand_red(),
-                discord.Color.brand_green(),
-                discord.Color.og_blurple(),
-                discord.Color.blurple(),
-                discord.Color.greyple(),
-                discord.Color.fuchsia(),
-                discord.Color.yellow(),
-                discord.Color.dark_blue(),
-                discord.Color.dark_green(),
-                discord.Color.dark_red(),
-                discord.Color.dark_grey(),
-                discord.Color.light_grey(),
-                discord.Color.dark_magenta(),
-                discord.Color.dark_gold(),
-                discord.Color.dark_orange(),
-                discord.Color.dark_teal(),
-                discord.Color.teal(),
-                discord.Color.blue(),
-                discord.Color.green(),
-                discord.Color.purple(),
-                discord.Color.magenta(),
-                discord.Color.gold(),
-                discord.Color.orange(),
-                discord.Color.red(),
-            ]
-            self.color = random.choice(colors)
+                BRIGHT_FACTOR = 1.5
+                self.color = discord.Color.from_rgb(
+                    min(255, int(dominant[2] * BRIGHT_FACTOR)),
+                    min(255, int(dominant[1] * BRIGHT_FACTOR)),
+                    min(255, int(dominant[0] * BRIGHT_FACTOR)),
+                )
+            except (error.URLError, OSError, ValueError, cv2.error) as e:
+                logger.warning(
+                    f"Failed to derive embed color from '{request_img}': {e}"
+                )
+                self.color = random.choice(self._RANDOM_EMBED_COLORS)
+        elif not config.embed_color:
+            self.color = random.choice(self._RANDOM_EMBED_COLORS)
 
     @classmethod
-    async def build(cls, config: ServerConfig, tries: int = 0) -> discord.Embed:
+    async def build(
+        cls,
+        config: ServerConfig,
+        tries: int = 0,
+        previous_status: ServerStatus | None = None,
+    ) -> discord.Embed:
         self = cls(config, tries)
-        res = await self._query(
+        if not config.embed_color:
+            # Colors picked/derived in __init__ are random per-instance; pin the
+            # resolved value back onto the config so later rebuilds reuse it
+            # instead of re-rolling a new color every poll.
+            config.embed_color = str(self.color)
+            if config.embed_id is not None:
+                server_store.update(config)
+
+        await self._query(
             config.query_host, config.query_port, config.protocol, config.name
         )
-        self.update = res
+        self.update = self.status != previous_status
         if self.title is None and self.update:
             self.title = config.name
-        ## TODO := env for repo owner? or github url? or just keep as is?
-        ## green => online, grey => offline, yellow/amber => not queried
-        self.set_footer(
-            icon_url=f"https://raw.githubusercontent.com/JasonEckardt/gamequery-discord-bot/refs/heads/master/assets/status_icons/{self.status}.png",
-            text=f"  •  {config.host}:{config.port}",
-        )
+
+        if self.status != ServerStatus.UNQUERIED:
+            icon_url = f"https://raw.githubusercontent.com/JasonEckardt/gamequery-discord-bot/refs/heads/master/assets/status_icons/{self.status.value}.png"
+            footer_text = f"{self.status.value}  •  {config.host}:{config.port}"
+        else:
+            icon_url = None
+            footer_text = f"{config.host}:{config.port}"
+
+        self.set_footer(icon_url=icon_url, text=footer_text)
+
         return self
 
     async def _query(
         self, address: str, port: int, protocol: Protocol, name: str
-    ) -> bool:
-        """
-        -> True: Rebuild embed
-        -> False: Don't rebuild embed
-        """
+    ) -> None:
         if protocol == Protocol.NONE:
-            return False
+            self.status = ServerStatus.UNQUERIED
         elif protocol == Protocol.A2S:
             query_endpoint = (address, port)
             try:
@@ -181,15 +208,23 @@ class ServerEmbed(discord.Embed):
                 OSError,
                 a2s.BrokenMessageError,
             ) as e:
+                if self.tries >= MAX_RETRIES:
+                    logger.debug(f"a2s: {name} - {address}:{port} still offline")
+                    self.status = ServerStatus.OFFLINE
+                    return
+
                 self.tries += 1
                 if self.tries >= MAX_RETRIES:
+                    logger.warning(
+                        f"a2s: {name} - {address}:{port} marked offline after {MAX_RETRIES} failed attempts"
+                    )
                     self.status = ServerStatus.OFFLINE
-                    return self.update
-                logger.warning(
-                    f"a2s: Failed to query {name} - {address}:{port}, waiting {MAX_RETRIES - self.tries} more times before marking offline: {e}"
-                )
-                self.status = ServerStatus.PENDING
-                return False
+                else:
+                    logger.warning(
+                        f"a2s: {name} - {address}:{port} failed query, waiting {MAX_RETRIES - self.tries} more times before marking offline: {e}"
+                    )
+                    self.status = ServerStatus.PENDING
+                return
 
             self.timestamp = datetime.now(timezone.utc)
             self.title = info.game
@@ -209,10 +244,9 @@ class ServerEmbed(discord.Embed):
             )
             self.status = ServerStatus.ONLINE
             self.tries = 0
-            return True
         else:
             logger.warning("The protocol for host {address} is unknown")
-        return False
+            self.status = ServerStatus.UNQUERIED
 
 
 class ServerStore:
@@ -221,16 +255,18 @@ class ServerStore:
         try:
             with open(OUT_SERVER_DATA, "r") as f:
                 self.servers = json.load(f)
-                logger.info(
-                    f"Found server store:\n {json.dumps(self.servers, indent=2)}"
+                logger.info("Loaded Server Store")
+                logger.debug(
+                    f"Loaded Server Store:\n {json.dumps(self.servers, indent=2)}"
                 )
         except FileNotFoundError:
-            logger.info("Initialize new server data store")
+            logger.info("Initialized new server data store")
 
     def _apply(self):
         with open(OUT_TMP, "w") as f:
             json.dump(self.servers, f, indent=2)
         os.replace(OUT_TMP, OUT_SERVER_DATA)
+        logger.debug(f"Updated server_store:\n {json.dumps(self.servers, indent=2)}")
 
     def delete(self, embed_id: str):
         self.servers.pop(embed_id)
@@ -244,15 +280,219 @@ class ServerStore:
             "host": config.host,
             "name": config.name,
             "port": config.port,
+            "protocol": config.protocol.value,
             "query_host": config.query_host,
             "query_port": config.query_port,
-            "protocol": config.protocol.value,
             "embed_color": config.embed_color,
             "embed_id": config.embed_id,
             "embed_image": config.embed_image,
             "embed_thumbnail": config.embed_thumbnail,
         }
         self._apply()
+
+
+def _text_field(text: str, description: str | None = None, required: bool = True):
+    return discord.ui.Label(
+        text=text,
+        description=description,
+        component=discord.ui.TextInput(
+            style=discord.TextStyle.short, max_length=128, required=required
+        ),
+    )
+
+
+def _sanitize_embed_color(embed_color: str | None) -> str | None:
+    if not embed_color:
+        return None
+    embed_color = embed_color.strip()
+    if not embed_color.startswith(("#", "0x")) and not embed_color.startswith("rgb("):
+        embed_color = f"#{embed_color}"
+    discord.Color.from_str(embed_color)  # raises ValueError if invalid
+    return embed_color
+
+
+def _sanitize_embed_url(url: str | None) -> str | None:
+    if not url:
+        return None
+    url = url.strip()
+    parsed = parse.urlparse(url)
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        raise ValueError(
+            f"'{url}' is not a valid URL. It must start with http:// or https://."
+        )
+    return url
+
+
+class EditConnectionModal(discord.ui.Modal, title="Edit Connection Details"):
+    host = _text_field("Host Address")
+    port = _text_field("Host Port")
+    protocol = discord.ui.Label(
+        text="Protocol",
+        component=discord.ui.Select(
+            options=[
+                discord.SelectOption(label=p.name, value=p.value) for p in Protocol
+            ],
+            required=True,
+        ),
+    )
+    query_host = _text_field("Query Address")
+    query_port = _text_field("Query Port")
+
+    def __init__(self, store: ServerStore, message: discord.Message):
+        super().__init__()
+        self.store = store
+        self.message = message
+
+        this_server = store.servers.get(str(message.id))
+        if this_server is None:
+            raise ValueError(f"No stored server config found for message {message.id}")
+        self.this_server = this_server
+
+        for field_name in ("host", "port", "query_host", "query_port"):
+            label: discord.ui.Label = getattr(self, field_name)
+            label.component.default = str(this_server[field_name])
+
+        current_protocol = this_server["protocol"]
+        for option in self.protocol.component.options:
+            option.default = option.value == current_protocol
+
+    async def on_submit(self, interaction: discord.Interaction, /) -> None:
+        await interaction.response.defer(ephemeral=True)
+
+        try:
+            port = int(self.port.component.value)
+            query_port = int(self.query_port.component.value)
+        except ValueError:
+            await interaction.followup.send(
+                "Host Port and Query Port must both be whole numbers.",
+                ephemeral=True,
+            )
+            return
+
+        protocol = Protocol(self.protocol.component.values[0])
+
+        updated = ServerConfig(
+            host=self.host.component.value,
+            name=self.this_server["name"],
+            port=port,
+            protocol=protocol,
+            query_host=self.query_host.component.value,
+            query_port=query_port,
+            embed_color=self.this_server["embed_color"],
+            embed_id=self.message.id,
+            embed_image=self.this_server["embed_image"],
+            embed_thumbnail=self.this_server["embed_thumbnail"],
+        )
+
+        self.store.update(updated)
+
+        embed = await ServerEmbed.build(updated)
+        await self.message.edit(embed=embed)
+
+        await interaction.followup.send(
+            f"Updated connection details for {updated.name}.", ephemeral=True
+        )
+
+
+class EditDisplayModal(discord.ui.Modal, title="Edit Display Details"):
+    name = _text_field("Server Name")
+    embed_color = _text_field("Embed Color", required=False)
+    embed_image = _text_field("Embed Image / Banner Image", required=False)
+    embed_thumbnail = _text_field("Embed Thumbnail / Game Logo", required=False)
+
+    def __init__(self, store: ServerStore, message: discord.Message):
+        super().__init__()
+        self.store = store
+        self.message = message
+
+        this_server = store.servers.get(str(message.id))
+        if this_server is None:
+            raise ValueError(f"No stored server config found for message {message.id}")
+        self.this_server = this_server
+
+        for field_name in ("name", "embed_color", "embed_image", "embed_thumbnail"):
+            label: discord.ui.Label = getattr(self, field_name)
+            value = this_server[field_name]
+            label.component.default = str(value) if value else ""
+
+    async def on_submit(self, interaction: discord.Interaction, /) -> None:
+        await interaction.response.defer(ephemeral=True)
+
+        try:
+            embed_color = _sanitize_embed_color(self.embed_color.component.value)
+        except ValueError:
+            await interaction.followup.send(
+                f"'{self.embed_color.component.value}' is not a valid embed color. "
+                "Use a hex code like #ff0000, 0xff0000, or rgb(255, 0, 0).",
+                ephemeral=True,
+            )
+            return
+
+        try:
+            embed_image = _sanitize_embed_url(self.embed_image.component.value)
+            embed_thumbnail = _sanitize_embed_url(self.embed_thumbnail.component.value)
+        except ValueError as e:
+            await interaction.followup.send(str(e), ephemeral=True)
+            return
+
+        updated = ServerConfig(
+            host=self.this_server["host"],
+            name=self.name.component.value,
+            port=self.this_server["port"],
+            protocol=Protocol(self.this_server["protocol"]),
+            query_host=self.this_server["query_host"],
+            query_port=self.this_server["query_port"],
+            embed_color=embed_color,
+            embed_id=self.message.id,
+            embed_image=embed_image,
+            embed_thumbnail=embed_thumbnail,
+        )
+
+        self.store.update(updated)
+
+        embed = await ServerEmbed.build(updated)
+        await self.message.edit(embed=embed)
+
+        await interaction.followup.send(
+            f"Updated display details for {updated.name}.", ephemeral=True
+        )
+
+
+class DeleteServerModal(discord.ui.Modal, title="Delete Game Server"):
+    name = _text_field("Type server name to confirm delete")
+
+    def __init__(self, store: ServerStore, message: discord.Message):
+        super().__init__()
+        self.store = store
+        self.message = message
+
+        this_server = store.servers.get(str(message.id))
+        if this_server is None:
+            raise ValueError(f"No stored server config found for message {message.id}")
+        self.this_server = this_server
+
+        self.name.component.placeholder = self.this_server["name"]
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+
+        entered_name = self.name.component.value
+        expected_name = self.this_server["name"]
+        if entered_name != expected_name:
+            await interaction.followup.send(
+                f"'{entered_name}' does not match server name '{expected_name}'. "
+                "Deletion cancelled.",
+                ephemeral=True,
+            )
+            return
+
+        self.store.delete(str(self.message.id))
+        try:
+            await self.message.delete()
+        except discord.NotFound:
+            pass
+
+        await interaction.followup.send(f"Deleted {expected_name}.", ephemeral=True)
 
 
 class Client(discord.Client):
@@ -262,6 +502,9 @@ class Client(discord.Client):
         super().__init__(intents=intents)
         self.tree = app_commands.CommandTree(self)
         self.tree.on_error = self.on_tree_error
+        # In-memory only, keyed by embed_id: (tries, last-seen status). Never
+        # persisted to server_store — it's poll-loop runtime state, not config.
+        self._poll_state: dict[str, tuple[int, ServerStatus | None]] = {}
 
     async def on_tree_error(
         self,
@@ -304,9 +547,11 @@ class Client(discord.Client):
                     embed_image=attrs["embed_image"],
                     embed_thumbnail=attrs["embed_thumbnail"],
                 )
-                embed = await ServerEmbed.build(config, tries=attrs.get("tries", 0))
-                attrs["tries"] = embed.tries
-                attrs["status"] = embed.status.value
+                tries, previous_status = self._poll_state.get(embed_id, (0, None))
+                embed = await ServerEmbed.build(
+                    config, tries=tries, previous_status=previous_status
+                )
+                self._poll_state[embed_id] = (embed.tries, embed.status)
                 if embed.update:
                     try:
                         message = await self.channel.fetch_message(
@@ -318,6 +563,9 @@ class Client(discord.Client):
                         message = await self.channel.send(embed=embed)
                         config.embed_id = message.id
                         server_store.update(config)
+                        self._poll_state[str(message.id)] = self._poll_state.pop(
+                            embed_id
+                        )
             except (discord.HTTPException, KeyError, TypeError, ValueError) as e:
                 logger.error(
                     f"Failed to update {embed_id} {attrs.get('name', '?')}: {e}"
@@ -337,13 +585,14 @@ async def on_ready():
 
 
 @client.tree.command(name="add-server", description="Register a game server")
+@app_commands.default_permissions(administrator=True)
 @app_commands.describe(
     name="Display name",
     host="Server IP or hostname",
     port="Connection port",
     protocol="Query protocol",
-    query_host="Host used for game query",
-    query_port="Port used for game query",
+    query_host="Host used for game query (required unless protocol is None)",
+    query_port="Port used for game query (required unless protocol is None)",
     embed_color="Hex embed color",
     embed_image="URL to embed vertical grid banner",
     embed_thumbnail="URL to game logo",
@@ -354,20 +603,37 @@ async def add_server(
     host: str,
     port: int,
     protocol: Protocol,
-    query_host: str,
-    query_port: int,
+    query_host: str | None,
+    query_port: int | None,
     embed_color: str | None,
     embed_image: str | None,
     embed_thumbnail: str | None,
 ):
     await interaction.response.defer(ephemeral=True)
 
-    if embed_color:
-        embed_color = embed_color.strip()
-        if not embed_color.startswith(("#", "0x")) and not embed_color.startswith(
-            "rgb("
-        ):
-            embed_color = f"#{embed_color}"
+    if protocol != Protocol.NONE and (query_host is None or query_port is None):
+        await interaction.followup.send(
+            "'query_host' and 'query_port' are required unless 'protocol' is 'None'.",
+            ephemeral=True,
+        )
+        return
+
+    try:
+        embed_color = _sanitize_embed_color(embed_color)
+    except ValueError:
+        await interaction.followup.send(
+            f"'{embed_color}' is not a valid embed color. "
+            "Use a hex code like #ff0000, 0xff0000, or rgb(255, 0, 0).",
+            ephemeral=True,
+        )
+        return
+
+    try:
+        embed_image = _sanitize_embed_url(embed_image)
+        embed_thumbnail = _sanitize_embed_url(embed_thumbnail)
+    except ValueError as e:
+        await interaction.followup.send(str(e), ephemeral=True)
+        return
 
     new_server = ServerConfig(
         host=host,
@@ -391,7 +657,45 @@ async def add_server(
     )
 
 
-## TODO:= Edit, Delete Server right-click action
+_NOT_A_SERVER_EMBED = (
+    "That message isn't a tracked server embed. "
+    "Right-click the server's status embed message instead."
+)
+
+
+## TODO:= Replace with matching permissions: Manage Messages, Delete Messages, etc.
+@client.tree.context_menu(name="Edit Connection Details")
+@app_commands.default_permissions(administrator=True)
+async def edit_server_connection(
+    interaction: discord.Interaction, message: discord.Message
+):
+    if str(message.id) not in server_store.servers:
+        await interaction.response.send_message(_NOT_A_SERVER_EMBED, ephemeral=True)
+        return
+    await interaction.response.send_modal(EditConnectionModal(server_store, message))
+
+
+@client.tree.context_menu(name="Edit Display Details")
+@app_commands.default_permissions(administrator=True)
+async def edit_server_display(
+    interaction: discord.Interaction, message: discord.Message
+):
+    if str(message.id) not in server_store.servers:
+        await interaction.response.send_message(_NOT_A_SERVER_EMBED, ephemeral=True)
+        return
+    await interaction.response.send_modal(EditDisplayModal(server_store, message))
+
+
+@client.tree.context_menu(name="Delete Game Server")
+@app_commands.default_permissions(administrator=True)
+async def delete_game_server(
+    interaction: discord.Interaction, message: discord.Message
+):
+    if str(message.id) not in server_store.servers:
+        await interaction.response.send_message(_NOT_A_SERVER_EMBED, ephemeral=True)
+        return
+    await interaction.response.send_modal(DeleteServerModal(server_store, message))
+
 
 if __name__ == "__main__":
     server_store = ServerStore()
