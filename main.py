@@ -3,7 +3,6 @@ import logging
 import os
 import random
 import sys
-import urllib
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
@@ -323,6 +322,30 @@ def _sanitize_embed_url(url: str | None) -> str | None:
     return url
 
 
+def _parse_server_embed(embed: discord.Embed) -> ServerConfig | None:
+    fields = {f.name: f.value for f in embed.fields}
+    host, port_raw, name = fields.get("Host"), fields.get("Port"), fields.get("Name")
+    if not host or not port_raw or not name:
+        return None
+    try:
+        port = int(port_raw)
+    except (TypeError, ValueError):
+        return None
+
+    return ServerConfig(
+        host=host,
+        name=name,
+        port=port,
+        protocol=Protocol.NONE,
+        query_host=None,
+        query_port=None,
+        embed_color=str(embed.color) if embed.color else None,
+        embed_id=None,
+        embed_image=embed.image.url if embed.image else None,
+        embed_thumbnail=embed.thumbnail.url if embed.thumbnail else None,
+    )
+
+
 class EditConnectionModal(discord.ui.Modal, title="Edit Connection Details"):
     host = _text_field("Host Address")
     port = _text_field("Host Port")
@@ -493,6 +516,76 @@ class DeleteServerModal(discord.ui.Modal, title="Delete Game Server"):
             pass
 
         await interaction.followup.send(f"Deleted {expected_name}.", ephemeral=True)
+
+
+class AddServerFromEmbedModal(discord.ui.Modal, title="Add to Server Store"):
+    protocol = discord.ui.Label(
+        text="Protocol",
+        component=discord.ui.Select(
+            options=[
+                discord.SelectOption(label=p.name, value=p.value) for p in Protocol
+            ],
+            required=True,
+        ),
+    )
+    query_host = _text_field("Query Address", required=False)
+    query_port = _text_field("Query Port", required=False)
+
+    def __init__(
+        self, store: ServerStore, message: discord.Message, parsed: ServerConfig
+    ):
+        super().__init__()
+        self.store = store
+        self.message = message
+        self.parsed = parsed
+
+        for option in self.protocol.component.options:
+            option.default = option.value == Protocol.NONE.value
+
+    async def on_submit(self, interaction: discord.Interaction, /) -> None:
+        await interaction.response.defer(ephemeral=True)
+
+        protocol = Protocol(self.protocol.component.values[0])
+        query_host = self.query_host.component.value or None
+        query_port_raw = self.query_port.component.value
+
+        query_port = None
+        if protocol != Protocol.NONE:
+            if not query_host or not query_port_raw:
+                await interaction.followup.send(
+                    "'Query Address' and 'Query Port' are required unless "
+                    "Protocol is 'None'.",
+                    ephemeral=True,
+                )
+                return
+            try:
+                query_port = int(query_port_raw)
+            except ValueError:
+                await interaction.followup.send(
+                    "Query Port must be a whole number.", ephemeral=True
+                )
+                return
+
+        new_server = ServerConfig(
+            host=self.parsed.host,
+            name=self.parsed.name,
+            port=self.parsed.port,
+            protocol=protocol,
+            query_host=query_host,
+            query_port=query_port,
+            embed_color=self.parsed.embed_color,
+            embed_id=self.message.id,
+            embed_image=self.parsed.embed_image,
+            embed_thumbnail=self.parsed.embed_thumbnail,
+        )
+        self.store.update(new_server)
+
+        embed = await ServerEmbed.build(new_server)
+        await self.message.edit(embed=embed)
+
+        await interaction.followup.send(
+            f"Added {new_server.name} to the server store.", ephemeral=True
+        )
 
 
 class Client(discord.Client):
@@ -695,6 +788,35 @@ async def delete_game_server(
         await interaction.response.send_message(_NOT_A_SERVER_EMBED, ephemeral=True)
         return
     await interaction.response.send_modal(DeleteServerModal(server_store, message))
+
+
+@client.tree.context_menu(name="Add to Server Store")
+@app_commands.default_permissions(administrator=True)
+async def add_to_server_store(
+    interaction: discord.Interaction, message: discord.Message
+):
+    if str(message.id) in server_store.servers:
+        await interaction.response.send_message(
+            "This message is already a tracked server.", ephemeral=True
+        )
+        return
+
+    if not message.embeds:
+        await interaction.response.send_message(_NOT_A_SERVER_EMBED, ephemeral=True)
+        return
+
+    parsed = _parse_server_embed(message.embeds[0])
+    if parsed is None:
+        await interaction.response.send_message(
+            "That embed doesn't look like a server config — it needs Host, "
+            "Port, and Name fields, with Port as a whole number.",
+            ephemeral=True,
+        )
+        return
+
+    await interaction.response.send_modal(
+        AddServerFromEmbedModal(server_store, message, parsed)
+    )
 
 
 if __name__ == "__main__":
