@@ -1,0 +1,26 @@
+{
+  "1535777208965136449": {
+    "host": "Test",
+    "name": "Test",
+    "port": 1,
+    "protocol": "None",
+    "query_host": null,
+    "query_port": null,
+    "embed_color": "#e74c3c",
+    "embed_id": 1535777208965136449,
+    "embed_image": null,
+    "embed_thumbnail": null
+  },
+  "1535769672082002011": {
+    "host": "lngs.lambdastack.org",
+    "name": "Abiotic Gamer",
+    "port": 7777,
+    "protocol": "A2S",
+    "query_host": "10.0.3.108",
+    "query_port": 27015,
+    "embed_color": "#a6ffff",
+    "embed_id": 1535769672082002011,
+    "embed_image": "https://cdn2.steamgriddb.com/grid/bff359543d05cf44de980756af30c403.jpg",
+    "embed_thumbnail": "https://cdn2.steamgriddb.com/logo/a0327e424a7f0233e8d20d444d3896c2.png"
+  }
+}
