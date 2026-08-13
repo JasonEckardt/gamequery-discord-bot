@@ -251,7 +251,10 @@ class ServerEmbed(discord.Embed):
                 name="Players",
                 value=f"{info.player_count!s}/{info.max_players!s}",
             )
-            self.add_field(name="Game Version", value=info.version)
+            if info.game == "Project Zomboid":
+                self.add_field(name="Build", value=rules["version"])
+            else:
+                self.add_field(name="Game Version", value=info.version)
             if info.game == "Abiotic Factor":
                 self.add_field(name="Story Progress", value=rules["StoryProgress_s"])
             ## TODO:= Parse rules['mods'] and display it nicer, either bullet newline or seperated
