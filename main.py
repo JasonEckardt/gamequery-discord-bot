@@ -256,8 +256,10 @@ class ServerEmbed(discord.Embed):
                 self.add_field(name="Story Progress", value=rules["StoryProgress_s"])
             ## TODO:= Parse rules['mods'] and display it nicer, either bullet newline or seperated
             if info.game == "Project Zomboid":
+                self.add_field(name="Map", value=info.map_name)
                 self.add_field(name="Mod Count", value=rules["modCount"])
-                self.add_field(name="Mods", inline=False, value=rules["mods"])
+                if rules["modCount"] != "0":
+                    self.add_field(name="Mods", inline=False, value=rules["mods"])
             logger.debug(
                 f"{address}:{port} ok: {info.game}, {info.player_count!s}/{info.max_players!s}"
             )
