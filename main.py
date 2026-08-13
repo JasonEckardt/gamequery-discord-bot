@@ -178,7 +178,7 @@ class ServerEmbed(discord.Embed):
             self.title = config.name
 
         if self.status != ServerStatus.UNQUERIED:
-            icon_url = f"https://raw.githubusercontent.com/JasonEckardt/gamequery-discord-bot/refs/heads/master/assets/status_icons/{self.status.value}.png"
+            icon_url = f"https://raw.githubusercontent.com/JasonEckardt/gamequery-discord-bot/refs/heads/0.2.0/assets/{self.status.value}.png"
             footer_text = f"{self.status.value}  •  {config.host}:{config.port}"
         else:
             icon_url = None
