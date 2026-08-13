@@ -55,7 +55,7 @@ class ServerConfig:
     protocol: Protocol
     query_host: str | None
     query_port: int | None
-    embed_color: discord.Color
+    embed_color: str | None
     embed_id: str | None
     embed_image: str | None
     embed_thumbnail: str | None
@@ -166,7 +166,7 @@ class ServerEmbed(discord.Embed):
     ) -> discord.Embed:
         self = cls(config, tries)
         if not config.embed_color:
-            config.embed_color = self.color
+            config.embed_color = str(self.color)
             if config.embed_id is not None:
                 server_store.update(config)
 
