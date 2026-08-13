@@ -166,10 +166,7 @@ class ServerEmbed(discord.Embed):
     ) -> discord.Embed:
         self = cls(config, tries)
         if not config.embed_color:
-            # Colors picked/derived in __init__ are random per-instance; pin the
-            # resolved value back onto the config so later rebuilds reuse it
-            # instead of re-rolling a new color every poll.
-            config.embed_color = str(self.color)
+            config.embed_color = self.color
             if config.embed_id is not None:
                 server_store.update(config)
 
@@ -300,13 +297,23 @@ def _text_field(text: str, description: str | None = None, required: bool = True
     )
 
 
-def _sanitize_embed_color(embed_color: str | None) -> str | None:
+async def _sanitize_embed_color(
+    interaction: discord.Interaction, embed_color: str | None
+) -> str | None:
     if not embed_color:
         return None
     embed_color = embed_color.strip()
     if not embed_color.startswith(("#", "0x")) and not embed_color.startswith("rgb("):
         embed_color = f"#{embed_color}"
-    discord.Color.from_str(embed_color)  # raises ValueError if invalid
+    try:
+        discord.Color.from_str(embed_color)
+    except ValueError:
+        await interaction.followup.send(
+            f"'{embed_color}' is not a valid embed color, so one was picked "
+            "automatically. Edit the server again to set a custom color.",
+            ephemeral=True,
+        )
+        return None
     return embed_color
 
 
@@ -441,15 +448,9 @@ class EditDisplayModal(discord.ui.Modal, title="Edit Display Details"):
     async def on_submit(self, interaction: discord.Interaction, /) -> None:
         await interaction.response.defer(ephemeral=True)
 
-        try:
-            embed_color = _sanitize_embed_color(self.embed_color.component.value)
-        except ValueError:
-            await interaction.followup.send(
-                f"'{self.embed_color.component.value}' is not a valid embed color. "
-                "Use a hex code like #ff0000, 0xff0000, or rgb(255, 0, 0).",
-                ephemeral=True,
-            )
-            return
+        embed_color = await _sanitize_embed_color(
+            interaction, self.embed_color.component.value
+        )
 
         try:
             embed_image = _sanitize_embed_url(self.embed_image.component.value)
@@ -711,15 +712,7 @@ async def add_server(
         )
         return
 
-    try:
-        embed_color = _sanitize_embed_color(embed_color)
-    except ValueError:
-        await interaction.followup.send(
-            f"'{embed_color}' is not a valid embed color. "
-            "Use a hex code like #ff0000, 0xff0000, or rgb(255, 0, 0).",
-            ephemeral=True,
-        )
-        return
+    embed_color = await _sanitize_embed_color(interaction, embed_color)
 
     try:
         embed_image = _sanitize_embed_url(embed_image)
