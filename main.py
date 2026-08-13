@@ -24,6 +24,14 @@ OUT_SERVER_DATA = "./server_data.json"
 
 MAX_RETRIES = int(os.getenv("MAX_RETRIES", "3"))
 
+# When on, every poll re-edits the message so the embed timestamp stays live.
+# When off, a message is only edited when its rendered content actually changed.
+HEARTBEAT_EDITS = os.getenv("HEARTBEAT_EDITS", "true").lower() not in (
+    "0",
+    "false",
+    "no",
+)
+
 discord.utils.setup_logging(
     level=os.getenv("LOG_LEVEL", "INFO"),
     root=True,
@@ -61,6 +69,13 @@ class ServerConfig:
     embed_thumbnail: str | None
 
 
+@dataclass
+class PollState:
+    tries: int = 0
+    status: ServerStatus | None = None
+    payload: dict | None = None
+
+
 class ServerEmbed(discord.Embed):
     _RANDOM_EMBED_COLORS: ClassVar[list[discord.Color]] = [
         discord.Color.brand_red(),
@@ -93,6 +108,8 @@ class ServerEmbed(discord.Embed):
         self.status = ServerStatus.PENDING
         self.tries = tries
         self.update = False
+        self.changed = False
+        self.payload = {}
         super().__init__()
 
         self.add_field(name="Host", value=config.host)
@@ -162,7 +179,7 @@ class ServerEmbed(discord.Embed):
         cls,
         config: ServerConfig,
         tries: int = 0,
-        previous_status: ServerStatus | None = None,
+        previous_payload: dict | None = None,
     ) -> discord.Embed:
         self = cls(config, tries)
         if not config.embed_color:
@@ -173,8 +190,7 @@ class ServerEmbed(discord.Embed):
         await self._query(
             config.query_host, config.query_port, config.protocol, config.name
         )
-        self.update = self.status != previous_status
-        if self.title is None and self.update:
+        if self.title is None:
             self.title = config.name
 
         if self.status != ServerStatus.UNQUERIED:
@@ -185,6 +201,13 @@ class ServerEmbed(discord.Embed):
             footer_text = f"{config.host}:{config.port}"
 
         self.set_footer(icon_url=icon_url, text=footer_text)
+
+        # Snapshot of everything rendered into the message. The timestamp is
+        # dropped so it can't mask a real content change as "always different".
+        self.payload = self.to_dict()
+        self.payload.pop("timestamp", None)
+        self.changed = previous_payload is not None and self.payload != previous_payload
+        self.update = self.changed or previous_payload is None or HEARTBEAT_EDITS
 
         return self
 
@@ -596,9 +619,10 @@ class Client(discord.Client):
         super().__init__(intents=intents)
         self.tree = app_commands.CommandTree(self)
         self.tree.on_error = self.on_tree_error
-        # In-memory only, keyed by embed_id: (tries, last-seen status). Never
-        # persisted to server_store — it's poll-loop runtime state, not config.
-        self._poll_state: dict[str, tuple[int, ServerStatus | None]] = {}
+        # In-memory only, keyed by embed_id: retry count, last-seen status and
+        # last-rendered embed payload. Never persisted to server_store — it's
+        # poll-loop runtime state, not config.
+        self._poll_state: dict[str, PollState] = {}
 
     async def on_tree_error(
         self,
@@ -641,25 +665,35 @@ class Client(discord.Client):
                     embed_image=attrs["embed_image"],
                     embed_thumbnail=attrs["embed_thumbnail"],
                 )
-                tries, previous_status = self._poll_state.get(embed_id, (0, None))
+                state = self._poll_state.get(embed_id, PollState())
                 embed = await ServerEmbed.build(
-                    config, tries=tries, previous_status=previous_status
+                    config, tries=state.tries, previous_payload=state.payload
                 )
-                self._poll_state[embed_id] = (embed.tries, embed.status)
+                # Retry counting must not depend on Discord, so tries/status are
+                # recorded every poll. The payload is only committed once the
+                # edit lands, otherwise a failed edit would swallow the change.
+                new_state = PollState(embed.tries, embed.status, state.payload)
+                self._poll_state[embed_id] = new_state
                 if embed.update:
+                    if embed.changed:
+                        logger.debug(f"{attrs['name']}: embed content changed")
                     try:
                         message = await self.channel.fetch_message(
                             int(attrs["embed_id"])
                         )
                         await message.edit(embed=embed)
+                        new_state.payload = embed.payload
                     except discord.NotFound:
                         server_store.delete(embed_id)
                         message = await self.channel.send(embed=embed)
                         config.embed_id = message.id
                         server_store.update(config)
+                        new_state.payload = embed.payload
                         self._poll_state[str(message.id)] = self._poll_state.pop(
                             embed_id
                         )
+                else:
+                    new_state.payload = embed.payload
             except (discord.HTTPException, KeyError, TypeError, ValueError) as e:
                 logger.error(
                     f"Failed to update {embed_id} {attrs.get('name', '?')}: {e}"
