@@ -74,6 +74,7 @@ class PollState:
     tries: int = 0
     status: ServerStatus | None = None
     payload: dict | None = None
+    last_online: datetime | None = None
 
 
 class ServerEmbed(discord.Embed):
@@ -180,6 +181,7 @@ class ServerEmbed(discord.Embed):
         config: ServerConfig,
         tries: int = 0,
         previous_payload: dict | None = None,
+        last_online: datetime | None = None,
     ) -> discord.Embed:
         self = cls(config, tries)
         if not config.embed_color:
@@ -190,6 +192,10 @@ class ServerEmbed(discord.Embed):
         await self._query(
             config.query_host, config.query_port, config.protocol, config.name
         )
+        if self.status == ServerStatus.OFFLINE:
+            # Freeze at the last poll the server answered, so the embed reads as
+            # "last online" instead of ticking forward while it's down.
+            self.timestamp = last_online
         if self.title is None:
             self.title = config.name
 
@@ -202,12 +208,12 @@ class ServerEmbed(discord.Embed):
 
         self.set_footer(icon_url=icon_url, text=footer_text)
 
-        # Snapshot of everything rendered into the message. The timestamp is
-        # dropped so it can't mask a real content change as "always different".
         self.payload = self.to_dict()
+        ## Pop timestamp to allow proper payload diffs
         self.payload.pop("timestamp", None)
         self.changed = previous_payload is not None and self.payload != previous_payload
-        self.update = self.changed or previous_payload is None or HEARTBEAT_EDITS
+        heartbeat = HEARTBEAT_EDITS and self.status != ServerStatus.OFFLINE
+        self.update = self.changed or previous_payload is None or heartbeat
 
         return self
 
@@ -672,12 +678,24 @@ class Client(discord.Client):
                 )
                 state = self._poll_state.get(embed_id, PollState())
                 embed = await ServerEmbed.build(
-                    config, tries=state.tries, previous_payload=state.payload
+                    config,
+                    tries=state.tries,
+                    previous_payload=state.payload,
+                    last_online=state.last_online,
                 )
                 # Retry counting must not depend on Discord, so tries/status are
                 # recorded every poll. The payload is only committed once the
                 # edit lands, otherwise a failed edit would swallow the change.
-                new_state = PollState(embed.tries, embed.status, state.payload)
+                # last_online only advances on a successful poll, so a PENDING
+                # retry streak doesn't drag the frozen "last online" time forward.
+                last_online = (
+                    embed.timestamp
+                    if embed.status == ServerStatus.ONLINE
+                    else state.last_online
+                )
+                new_state = PollState(
+                    embed.tries, embed.status, state.payload, last_online
+                )
                 self._poll_state[embed_id] = new_state
                 if embed.update:
                     if embed.changed:
